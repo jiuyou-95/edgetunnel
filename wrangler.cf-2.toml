@@ -1,0 +1,8 @@
+name = "tz"
+main = "_worker.js"
+compatibility_date = "2025-11-04"
+keep_vars = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "4de80b484a4a46d891a59135e9bd82e4"

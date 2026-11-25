@@ -1,4 +1,4 @@
-name: Upstream Sync
+name: Upstream Sync and Multi-CF Deploy
 
 permissions:
   contents: write
@@ -18,6 +18,8 @@ jobs:
     name: Sync latest commits from upstream repo
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
 
     steps:
       - name: Checkout target repo
@@ -57,10 +59,42 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+  deploy:
+    name: Deploy ${{ matrix.target }}
+    needs: sync_latest_from_upstream
+    if: needs.sync_latest_from_upstream.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.target }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: cf-1
+            config: wrangler.toml
+          - target: cf-2
+            config: wrangler.cf-2.toml
+          - target: cf-3
+            config: wrangler.cf-3.toml
+
+    steps:
+      - name: Checkout updated main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Validate Cloudflare credentials
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing CLOUDFLARE_API_TOKEN in environment ${{ matrix.target }}"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID in environment ${{ matrix.target }}"; exit 1; }
+
       - name: Deploy Cloudflare Worker
-        if: steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          command: deploy --config ${{ matrix.config }}
