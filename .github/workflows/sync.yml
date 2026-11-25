@@ -147,6 +147,7 @@ jobs:
       - name: Prepare Pages Advanced Mode directory
         shell: bash
         run: |
+          cp "${{ matrix.config }}" wrangler.toml
           mkdir -p pages-dist
           cp _worker.js pages-dist/_worker.js
           printf '%s\n' '<!doctype html><meta charset="utf-8"><title>tz-pages</title>' > pages-dist/index.html
@@ -157,7 +158,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy pages-dist --project-name=tz-pages --branch=main --config ${{ matrix.config }} --no-bundle
+          command: pages deploy pages-dist --project-name=tz-pages --branch=main --no-bundle
           gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attach private Custom Domain to Pages
