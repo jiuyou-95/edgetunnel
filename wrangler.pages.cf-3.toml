@@ -1,0 +1,7 @@
+name = "tz-pages"
+pages_build_output_dir = "./pages-dist"
+compatibility_date = "2025-11-04"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "3c4cd84063a242d09f0e9387161fd389"

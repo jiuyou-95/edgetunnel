@@ -2,6 +2,7 @@ name: Upstream Sync and Multi-CF Deploy
 
 permissions:
   contents: write
+  deployments: write
 
 on:
   schedule:
@@ -59,8 +60,8 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-  deploy:
-    name: Deploy ${{ matrix.target }}
+  deploy_pages:
+    name: Deploy Pages ${{ matrix.target }}
     needs: sync_latest_from_upstream
     if: needs.sync_latest_from_upstream.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -71,11 +72,11 @@ jobs:
       matrix:
         include:
           - target: cf-1
-            config: wrangler.toml
+            config: wrangler.pages.toml
           - target: cf-2
-            config: wrangler.cf-2.toml
+            config: wrangler.pages.cf-2.toml
           - target: cf-3
-            config: wrangler.cf-3.toml
+            config: wrangler.pages.cf-3.toml
 
     steps:
       - name: Checkout updated main
@@ -94,17 +95,99 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID in environment ${{ matrix.target }}"; exit 1; }
           test -n "$WORKER_DOMAIN" || { echo "Missing WORKER_DOMAIN in environment ${{ matrix.target }}"; exit 1; }
 
-      - name: Prepare private Custom Domain config
+      - name: Ensure Cloudflare Pages project exists
         shell: bash
         env:
-          WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          cp "${{ matrix.config }}" wrangler.deploy.toml
-          printf '%s\n' '' '[[routes]]' "pattern = \"$WORKER_DOMAIN\"" 'custom_domain = true' >> wrangler.deploy.toml
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
 
-      - name: Deploy Cloudflare Worker
+          account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          token = os.environ["CLOUDFLARE_API_TOKEN"]
+          base = f"https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects"
+          headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+          def request(method, url, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as error:
+                  try:
+                      body = json.load(error)
+                  except Exception:
+                      body = {"errors": [{"message": str(error)}]}
+                  return error.code, body
+
+          status, body = request("GET", f"{base}/tz-pages")
+          if status == 404:
+              status, body = request("POST", base, {"name": "tz-pages", "production_branch": "main"})
+          if status not in (200, 201):
+              raise SystemExit("Unable to ensure Pages project: " + json.dumps(body.get("errors", body)))
+          print("Pages project tz-pages is ready")
+          PY
+
+      - name: Prepare Pages Advanced Mode directory
+        shell: bash
+        run: |
+          mkdir -p pages-dist
+          cp _worker.js pages-dist/_worker.js
+          printf '%s\n' '<!doctype html><meta charset="utf-8"><title>tz-pages</title>' > pages-dist/index.html
+
+      - name: Deploy Cloudflare Pages
+        id: deploy
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --config wrangler.deploy.toml
+          command: pages deploy pages-dist --project-name=tz-pages --branch=main --config ${{ matrix.config }} --no-bundle
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach private Custom Domain to Pages
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_DOMAIN: ${{ secrets.WORKER_DOMAIN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          account = os.environ["CLOUDFLARE_ACCOUNT_ID"]
+          token = os.environ["CLOUDFLARE_API_TOKEN"]
+          domain = os.environ["WORKER_DOMAIN"]
+          url = f"https://api.cloudflare.com/client/v4/accounts/{account}/pages/projects/tz-pages/domains"
+          headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+          def request(method, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as error:
+                  try:
+                      body = json.load(error)
+                  except Exception:
+                      body = {"errors": [{"message": str(error)}]}
+                  return error.code, body
+
+          status, body = request("GET")
+          if status != 200:
+              raise SystemExit("Unable to list Pages domains: " + json.dumps(body.get("errors", body)))
+          names = {item.get("name") for item in body.get("result", [])}
+          if domain not in names:
+              status, body = request("POST", {"name": domain})
+              if status not in (200, 201):
+                  raise SystemExit("Unable to attach Pages domain: " + json.dumps(body.get("errors", body)))
+          print("Private custom domain is attached to tz-pages")
+          PY
